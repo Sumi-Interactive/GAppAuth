@@ -59,7 +59,7 @@ public final class GAppAuth: NSObject {
     
     // MARK: - Private vars
     
-    private(set) var authorization: GTMAppAuthFetcherAuthorization?
+    private(set) var authorization: AuthSession?
     
     // Auth scopes
     private var scopes = [OIDScopeOpenID, OIDScopeProfile]
@@ -123,7 +123,7 @@ public final class GAppAuth: NSObject {
                 var response = false
                 if let authState = authState {
                     
-                    let authorization = GTMAppAuthFetcherAuthorization(authState: authState)
+                    let authorization = AuthSession(authState: authState)
                     self.setAuthorization(authorization)
                     response = true
                     
@@ -176,25 +176,28 @@ public final class GAppAuth: NSObject {
     /// Load any existing authorization from the key chain on app start.
     public func retrieveExistingAuthorizationState() {
         let keychainItemName = GAppAuth.KeychainItemName
-        if let authorization = GTMAppAuthFetcherAuthorization(fromKeychainForName: keychainItemName) {
+        let store = KeychainStore(itemName: keychainItemName)
+        if let authorization = try? store.retrieveAuthSession() {
             setAuthorization(authorization)
         }
     }
     
     /// Resets the authorization state and removes any stored information.
     public func resetAuthorizationState() {
-        GTMAppAuthFetcherAuthorization.removeFromKeychain(forName: GAppAuth.KeychainItemName)
+        let keychainItemName = GAppAuth.KeychainItemName
+        let store = KeychainStore(itemName: keychainItemName)
+        try? store.removeAuthSession()
         // As keychain and cached authorization token are meant to be in sync, we also have to:
         setAuthorization(nil)
     }
     
     /// Query the current authorization state
-    public func getCurrentAuthorization() -> GTMAppAuthFetcherAuthorization? { return authorization }
+    public func getCurrentAuthorization() -> AuthSession? { return authorization }
     
     // MARK: - Internal functions
     
     /// Internal: Store the authorization.
-    private func setAuthorization(_ authorization: GTMAppAuthFetcherAuthorization?) {
+    private func setAuthorization(_ authorization: AuthSession?) {
         guard self.authorization == nil || !self.authorization!.isEqual(authorization) else { return }
         
         self.authorization = authorization
@@ -213,11 +216,12 @@ public final class GAppAuth: NSObject {
         guard let authorization = authorization else { return }
         
         let keychainItemName = GAppAuth.KeychainItemName
-        if authorization.canAuthorize() {
-            GTMAppAuthFetcherAuthorization.save(authorization, toKeychainForName: keychainItemName)
+        let store = KeychainStore(itemName: keychainItemName)
+        if authorization.canAuthorize {
+            try? store.save(authSession: authorization)
         } else {
             // Remove existing authorization state
-            GTMAppAuthFetcherAuthorization.removeFromKeychain(forName: keychainItemName)
+            try? store.removeAuthSession()
         }
     }
     
@@ -230,7 +234,7 @@ extension GAppAuth: OIDAuthStateChangeDelegate {
     public func didChange(_ state: OIDAuthState) {
         guard self.authorization != nil else { return }
         
-        let authorization = GTMAppAuthFetcherAuthorization(authState: state)
+        let authorization = AuthSession(authState: state)
         self.setAuthorization(authorization)
         
         if let stateChangeCallback = stateChangeCallback {

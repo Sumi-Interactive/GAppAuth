@@ -55,7 +55,7 @@ public final class GAppAuth: NSObject {
     
     // MARK: - Private vars
     
-    private(set) var authorization: GTMAppAuthFetcherAuthorization?
+    private(set) var authorization: AuthSession?
     
     // Auth scopes
     private var scopes = [OIDScopeOpenID, OIDScopeProfile]
@@ -91,7 +91,6 @@ public final class GAppAuth: NSObject {
     ///
     /// - parameter presentingViewController: The UIViewController that starts the workflow.
     /// - parameter callback: A completion callback to be used for further processing.
-    @available(iOS 8.0, *)
     public func authorize(in presentingViewController: UIViewController, callback: ((Bool) -> Void)?) throws {
         guard GAppAuth.RedirectUri != "" else {
             throw GAppAuthError.plistValueEmpty("The value for RedirectUri seems to be wrong, did you forget to set it up?")
@@ -105,7 +104,8 @@ public final class GAppAuth: NSObject {
         let redirectURI = URL(string: GAppAuth.RedirectUri)!
         
         // Search for endpoints
-        OIDAuthorizationService.discoverConfiguration(forIssuer: issuer) {(configuration: OIDServiceConfiguration?, error: Error?) in
+        OIDAuthorizationService.discoverConfiguration(forIssuer: issuer) { [weak self] (configuration: OIDServiceConfiguration?, error: Error?) in
+            guard let self else { return }
             
             if configuration == nil {
                 self.setAuthorization(nil)
@@ -116,25 +116,36 @@ public final class GAppAuth: NSObject {
             let request = OIDAuthorizationRequest(configuration: configuration!, clientId: GAppAuth.ClientId, scopes: self.scopes, redirectURL: redirectURI, responseType: OIDResponseTypeCode, additionalParameters: nil)
             
             // Store auth flow to be resumed after app reentry, serialize response
-            self.currentAuthorizationFlow = OIDAuthState.authState(byPresenting: request, presenting: presentingViewController) { authState, error in
-                var response = false
-                if let authState = authState {
-                    
-                    let authorization = GTMAppAuthFetcherAuthorization(authState: authState)
-                    self.setAuthorization(authorization)
-                    response = true
-                    
-                } else {
-                    self.setAuthorization(nil)
-                    if let error = error {
-                        NSLog("Authorization error: \(error.localizedDescription)")
-                    }
-                }
-                
-                if let callback = callback {
-                    callback(response)
+#if os(iOS) && targetEnvironment(macCatalyst)
+            if let agent = OIDExternalUserAgentCatalyst(presenting: presentingViewController) {
+                self.currentAuthorizationFlow = OIDAuthState.authState(byPresenting: request, externalUserAgent: agent)
+                { [weak self] authState, error in
+                    self?.handle(authState: authState, error: error, callback: callback)
                 }
             }
+#else
+            self.currentAuthorizationFlow = OIDAuthState.authState(byPresenting: request, presenting: presentingViewController) { [weak self] authState, error in
+                self?.handle(authState: authState, error: error, callback: callback)
+            }
+#endif
+        }
+    }
+    
+    func handle(authState: OIDAuthState?, error: Error?, callback: ((Bool) -> Void)?) {
+        var response = false
+        if let authState = authState {
+            let authorization = AuthSession(authState: authState)
+            self.setAuthorization(authorization)
+            response = true
+        } else {
+            self.setAuthorization(nil)
+            if let error {
+                NSLog("Authorization error: \(error.localizedDescription)")
+            }
+        }
+        
+        if let callback {
+            callback(response)
         }
     }
     
@@ -167,31 +178,34 @@ public final class GAppAuth: NSObject {
     ///
     /// - returns: true, if there is a valid authorization available, else false
     public func isAuthorized() -> Bool {
-        return authorization != nil ? authorization!.canAuthorize() : false
+        return authorization != nil ? authorization!.canAuthorize : false
     }
     
     /// Load any existing authorization from the key chain on app start.
     public func retrieveExistingAuthorizationState() {
         let keychainItemName = GAppAuth.KeychainItemName
-        if let authorization = GTMAppAuthFetcherAuthorization(fromKeychainForName: keychainItemName) {
+        let store = KeychainStore(itemName: keychainItemName)
+        if let authorization = try? store.retrieveAuthSession() {
             setAuthorization(authorization)
         }
     }
     
     /// Resets the authorization state and removes any stored information.
     public func resetAuthorizationState() {
-        GTMAppAuthFetcherAuthorization.removeFromKeychain(forName: GAppAuth.KeychainItemName)
+        let keychainItemName = GAppAuth.KeychainItemName
+        let store = KeychainStore(itemName: keychainItemName)
+        try? store.removeAuthSession()
         // As keychain and cached authorization token are meant to be in sync, we also have to:
         setAuthorization(nil)
     }
     
     /// Query the current authorization state
-    public func getCurrentAuthorization() -> GTMAppAuthFetcherAuthorization? { return authorization }
+    public func getCurrentAuthorization() -> AuthSession? { return authorization }
     
     // MARK: - Internal functions
     
     /// Internal: Store the authorization.
-    private func setAuthorization(_ authorization: GTMAppAuthFetcherAuthorization?) {
+    private func setAuthorization(_ authorization: AuthSession?) {
         guard self.authorization == nil || !self.authorization!.isEqual(authorization) else { return }
         
         self.authorization = authorization
@@ -207,14 +221,15 @@ public final class GAppAuth: NSObject {
     /// Internal: Save the authorization result from the workflow.
     private func serializeAuthorizationState() {
         // No authorization available which can be saved
-        guard let authorization = authorization else { return }
+        guard let authorization else { return }
         
         let keychainItemName = GAppAuth.KeychainItemName
-        if authorization.canAuthorize() {
-            GTMAppAuthFetcherAuthorization.save(authorization, toKeychainForName: keychainItemName)
+        let store = KeychainStore(itemName: keychainItemName)
+        if authorization.canAuthorize {
+            try? store.save(authSession: authorization)
         } else {
             // Remove existing authorization state
-            GTMAppAuthFetcherAuthorization.removeFromKeychain(forName: keychainItemName)
+            try? store.removeAuthSession()
         }
     }
     
@@ -227,7 +242,7 @@ extension GAppAuth: OIDAuthStateChangeDelegate {
     public func didChange(_ state: OIDAuthState) {
         guard self.authorization != nil else { return }
         
-        let authorization = GTMAppAuthFetcherAuthorization(authState: state)
+        let authorization = AuthSession(authState: state)
         self.setAuthorization(authorization)
         
         if let stateChangeCallback = stateChangeCallback {

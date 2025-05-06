@@ -1,6 +1,9 @@
-# Metafiles
 .DS_Store
-Thumbs.db
-
-# Build output
-.build
+/.build
+/Packages
+/*.xcodeproj
+xcuserdata/
+DerivedData/
+.swiftpm/config/registries.json
+.swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
+.netrc
